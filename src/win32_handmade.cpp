@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <cstdint>
 
 // static is a horrible keyword in c/c++
 #define local_persist static
@@ -8,46 +9,109 @@
 // TODO these are global for now
 global_variable bool Running;
 global_variable BITMAPINFO bitmap_info;
-global_variable void **bitmap_memory;
-global_variable HBITMAP bitmap_handle;
-global_variable HDC bitmap_device_context;
+global_variable void *bitmap_memory;
+global_variable int bitmap_width;
+global_variable int bitmap_height;
+
+internal void
+RenderWeirdGradient(int x_offset, int y_offset) {
+    int width = bitmap_width;
+    int height = bitmap_height;
+    int bytes_per_pixel = 4;
+    // pitch is the distance between the start of one row and the start of the next
+    int pitch = width * bytes_per_pixel;
+    // not sure about this fancy c++ stuff
+    uint8_t *row = (uint8_t *) bitmap_memory;
+    for (int y = 0; y < height; ++y) {
+        // this is for demonstration purposes; a pixel is really 4 bytes
+        uint8_t *pixel = row;
+        for (int x = 0; x < width; ++x) {
+            /*
+             *                  0  1  2  3
+             * Pixel in memory: 00 00 00 00
+             * but these are actually little endian
+             * so instead of RRGGBBAA, we'd expect to get 0xAABBGGRR
+             * but because windows is windows, only RGB is reversed, the alpha channel is still at the end
+             * so it is in fact 0xBBGGRRAA
+             */
+            *pixel = (uint8_t) (x + x_offset);
+            ++pixel;
+
+            *pixel = (uint8_t) (y + y_offset);
+            ++pixel;
+
+            *pixel = 0;
+            ++pixel;
+
+            *pixel = 0;
+            ++pixel;
+        }
+        row += pitch;
+    }
+}
 
 internal void
 Win32ResizeDIBSection(int width, int height) {
     // TODO bulletproof
     // maybe don't free first, free after, then free first if that fails
 
-    if (bitmap_handle) {
-        DeleteObject(bitmap_handle);
+    if (bitmap_memory) {
+        VirtualFree(bitmap_memory, 0, MEM_RELEASE);
     }
 
-    if (!bitmap_device_context) {
-        // TODO should we recreate these under certain circumstances?
-        bitmap_device_context = CreateCompatibleDC(nullptr);
-    }
+    bitmap_width = width;
+    bitmap_height = height;
 
     bitmap_info.bmiHeader.biSize = sizeof(bitmap_info.bmiHeader);
-    bitmap_info.bmiHeader.biWidth = width;
-    bitmap_info.bmiHeader.biHeight = height;
+    bitmap_info.bmiHeader.biWidth = bitmap_width;
+    // negative bitmap height means the rows are top-down; a bit easier to reason about as a beginner
+    bitmap_info.bmiHeader.biHeight = -bitmap_height;
     bitmap_info.bmiHeader.biPlanes = 1;
     bitmap_info.bmiHeader.biBitCount = 32; // RGBA;
     bitmap_info.bmiHeader.biCompression = BI_RGB;
 
-    bitmap_handle = CreateDIBSection(
-        bitmap_device_context,
-        &bitmap_info,
-        DIB_RGB_COLORS,
-        bitmap_memory,
-        0, 0
-    );
+    int bytes_per_pixel = 4;
+    int bitmap_memory_size = bitmap_width * bitmap_height * bytes_per_pixel;
+    bitmap_memory = VirtualAlloc(nullptr, bitmap_memory_size, MEM_COMMIT, PAGE_READWRITE);
+
+    RenderWeirdGradient(0, 0);
+    // // pitch is the distance between the start of one row and the start of the next
+    // int pitch = width * bytes_per_pixel;
+    // // not sure about this fancy c++ stuff
+    // auto *row = static_cast<uint8_t *>(bitmap_memory);
+    // for (int y = 0; y < bitmap_height; ++y) {
+    //     auto *pixel = reinterpret_cast<uint32_t *>(row);
+    //     for (int x = 0; x < bitmap_width; ++x) {
+    //        /*
+    //         *                  0  1  2  3
+    //         * Pixel in memory: 00 00 00 00
+    //         * but these are actually little endian
+    //         * so instead of RRGGBBAA, we'd expect to get 0xAABBGGRR
+    //         * but because windows is windows, only RGB is reversed, the alpha channel is still at the end
+    //         * so it is in fact 0xBBGGRRAA
+    //         */
+    //     }
+    //     row += pitch;
+    // }
 }
 
 internal void
-Win32UpdateWindow(HDC device_context, int x, int y, int width, int height) {
+Win32UpdateWindow(HDC device_context, RECT *window_rect, int x, int y, int width, int height) {
+    // StretchDIBits(
+    //     device_context,
+    //     x, y, width, height,
+    //     x, y, width, height,
+    //     bitmap_memory,
+    //     &bitmap_info,
+    //     DIB_RGB_COLORS,
+    //     SRCCOPY
+    // );
+    int window_width = window_rect->right - window_rect->left;
+    int window_height = window_rect->bottom - window_rect->top;
     StretchDIBits(
         device_context,
-        x, y, width, height,
-        x, y, width, height,
+        0, 0, bitmap_width, bitmap_height,
+        0, 0, window_width, window_height,
         bitmap_memory,
         &bitmap_info,
         DIB_RGB_COLORS,
@@ -75,6 +139,9 @@ Win32MainWindowCallback(
         }
         break;
         case WM_PAINT: {
+            RECT client_rect;
+            GetClientRect(window, &client_rect);
+
             PAINTSTRUCT paint;
             HDC device_context = BeginPaint(window, &paint);
             if (device_context) {
@@ -83,7 +150,7 @@ Win32MainWindowCallback(
                 y = paint.rcPaint.top;
                 width = paint.rcPaint.right - paint.rcPaint.left;
                 height = paint.rcPaint.bottom - paint.rcPaint.top;
-                Win32UpdateWindow(device_context, x, y, width, height);
+                Win32UpdateWindow(device_context, &client_rect, x, y, width, height);
             } else {
                 // TODO errohandling
             }
@@ -144,12 +211,12 @@ int CALLBACK WinMain(
             MSG message;
             Running = true;
             while (Running) {
-                BOOL message_result = GetMessage(&message, nullptr, 0, 0);
-                if (message_result > 0) {
+                while (PeekMessage(&message, nullptr, 0, 0, PM_REMOVE)) {
+                    if (message.message == WM_QUIT) {
+                        Running = false;
+                    }
                     TranslateMessage(&message);
                     DispatchMessage(&message);
-                } else {
-                    break;
                 }
             }
         } else {
