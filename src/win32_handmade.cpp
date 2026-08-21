@@ -6,25 +6,45 @@
 #define global_variable static
 #define internal static
 
+struct win32_offscreen_buffer {
+    BITMAPINFO info;
+    void *memory;
+    int width;
+    int height;
+    int pitch;
+    int bytes_per_pixel;
+};
+
+struct win32_window_dimensions {
+    int width;
+    int height;
+};
+
+internal win32_window_dimensions
+get_window_dimensions(HWND window) {
+    RECT client_rect;
+    GetClientRect(window, &client_rect);
+
+    win32_window_dimensions dimensions = {};
+    dimensions.width = client_rect.right - client_rect.left;
+    dimensions.height = client_rect.bottom - client_rect.top;
+
+    return dimensions;
+}
+
 // TODO these are global for now
 global_variable bool Running;
-global_variable BITMAPINFO bitmap_info;
-global_variable void *bitmap_memory;
-global_variable int bitmap_width;
-global_variable int bitmap_height;
+global_variable win32_offscreen_buffer global_backbuffer;
+
 
 internal void
-RenderWeirdGradient(int x_offset, int y_offset) {
-    int width = bitmap_width;
-    int height = bitmap_height;
-    int bytes_per_pixel = 4;
-    // pitch is the distance between the start of one row and the start of the next
-    int pitch = width * bytes_per_pixel;
+RenderWeirdGradient(win32_offscreen_buffer buffer, int x_offset, int y_offset) {
+    // TODO decide whether to pass by ref or val
     // not sure about this fancy c++ stuff
-    uint8_t *row = (uint8_t *) bitmap_memory;
-    for (int y = 0; y < height; ++y) {
+    uint8_t *row = (uint8_t *) buffer.memory;
+    for (int y = 0; y < buffer.height; ++y) {
         uint32_t *pixel = (uint32_t *) row;
-        for (int x = 0; x < width; ++x) {
+        for (int x = 0; x < buffer.width; ++x) {
             /*
              *                  0  1  2  3
              * Pixel in memory: 00 00 00 00
@@ -38,74 +58,47 @@ RenderWeirdGradient(int x_offset, int y_offset) {
 
             *pixel++ = (green << 8) | blue;
         }
-        row += pitch;
+        row += buffer.pitch;
     }
 }
 
 internal void
-Win32ResizeDIBSection(int width, int height) {
+Win32ResizeDIBSection(win32_offscreen_buffer *buffer, int width, int height) {
     // TODO bulletproof
     // maybe don't free first, free after, then free first if that fails
 
-    if (bitmap_memory) {
-        VirtualFree(bitmap_memory, 0, MEM_RELEASE);
+    if (buffer->memory) {
+        VirtualFree(buffer->memory, 0, MEM_RELEASE);
     }
 
-    bitmap_width = width;
-    bitmap_height = height;
+    buffer->width = width;
+    buffer->height = height;
 
-    bitmap_info.bmiHeader.biSize = sizeof(bitmap_info.bmiHeader);
-    bitmap_info.bmiHeader.biWidth = bitmap_width;
+    buffer->info.bmiHeader.biSize = sizeof(buffer->info.bmiHeader);
+    buffer->info.bmiHeader.biWidth = buffer->width;
     // negative bitmap height means the rows are top-down; a bit easier to reason about as a beginner
-    bitmap_info.bmiHeader.biHeight = -bitmap_height;
-    bitmap_info.bmiHeader.biPlanes = 1;
-    bitmap_info.bmiHeader.biBitCount = 32; // RGBA;
-    bitmap_info.bmiHeader.biCompression = BI_RGB;
+    buffer->info.bmiHeader.biHeight = -buffer->height;
+    buffer->info.bmiHeader.biPlanes = 1;
+    buffer->info.bmiHeader.biBitCount = 32; // RGBA;
+    buffer->info.bmiHeader.biCompression = BI_RGB;
 
-    int bytes_per_pixel = 4;
-    int bitmap_memory_size = bitmap_width * bitmap_height * bytes_per_pixel;
-    bitmap_memory = VirtualAlloc(nullptr, bitmap_memory_size, MEM_COMMIT, PAGE_READWRITE);
+    buffer->bytes_per_pixel = 4;
+    int bitmap_memory_size = buffer->width * buffer->height * buffer->bytes_per_pixel;
+    buffer->memory = VirtualAlloc(nullptr, bitmap_memory_size, MEM_COMMIT, PAGE_READWRITE);
 
-    RenderWeirdGradient(0, 0);
-    // // pitch is the distance between the start of one row and the start of the next
-    // int pitch = width * bytes_per_pixel;
-    // // not sure about this fancy c++ stuff
-    // auto *row = static_cast<uint8_t *>(bitmap_memory);
-    // for (int y = 0; y < bitmap_height; ++y) {
-    //     auto *pixel = reinterpret_cast<uint32_t *>(row);
-    //     for (int x = 0; x < bitmap_width; ++x) {
-    //        /*
-    //         *                  0  1  2  3
-    //         * Pixel in memory: 00 00 00 00
-    //         * but these are actually little endian
-    //         * so instead of RRGGBBAA, we'd expect to get 0xAABBGGRR
-    //         * but because windows is windows, only RGB is reversed, the alpha channel is still at the end
-    //         * so it is in fact 0xBBGGRRAA
-    //         */
-    //     }
-    //     row += pitch;
-    // }
+    buffer->pitch = buffer->width * buffer->bytes_per_pixel;
 }
 
 internal void
-Win32UpdateWindow(HDC device_context, RECT *window_rect, int x, int y, int width, int height) {
-    // StretchDIBits(
-    //     device_context,
-    //     x, y, width, height,
-    //     x, y, width, height,
-    //     bitmap_memory,
-    //     &bitmap_info,
-    //     DIB_RGB_COLORS,
-    //     SRCCOPY
-    // );
-    int window_width = window_rect->right - window_rect->left;
-    int window_height = window_rect->bottom - window_rect->top;
+Win32DisplayBufferInWindow(HDC device_context, int window_width, int window_height, win32_offscreen_buffer buffer,
+                           int x, int y, int width, int height) {
+    // TODO aspect ratio correction
     StretchDIBits(
         device_context,
-        0, 0, bitmap_width, bitmap_height,
         0, 0, window_width, window_height,
-        bitmap_memory,
-        &bitmap_info,
+        0, 0, buffer.width, buffer.height,
+        buffer.memory,
+        &buffer.info,
         DIB_RGB_COLORS,
         SRCCOPY
     );
@@ -121,12 +114,6 @@ Win32MainWindowCallback(
     LRESULT result = 0;
     switch (message) {
         case WM_SIZE: {
-            RECT client_rect;
-            GetClientRect(window, &client_rect);
-            int width, height;
-            width = client_rect.right - client_rect.left;
-            height = client_rect.bottom - client_rect.top;
-            Win32ResizeDIBSection(width, height);
             OutputDebugString("WM_SIZE\n");
         }
         break;
@@ -142,7 +129,9 @@ Win32MainWindowCallback(
                 y = paint.rcPaint.top;
                 width = paint.rcPaint.right - paint.rcPaint.left;
                 height = paint.rcPaint.bottom - paint.rcPaint.top;
-                Win32UpdateWindow(device_context, &client_rect, x, y, width, height);
+                const win32_window_dimensions dimensions = get_window_dimensions(window);
+                Win32DisplayBufferInWindow(device_context, dimensions.width, dimensions.height, global_backbuffer, x, y,
+                                           width, height);
             } else {
                 // TODO errohandling
             }
@@ -173,12 +162,15 @@ Win32MainWindowCallback(
     return result;
 }
 
-int CALLBACK WinMain(
+int CALLBACK
+WinMain(
     _In_ HINSTANCE hInstance,
     _In_opt_ HINSTANCE hPrevInstance,
     _In_ LPSTR lpCmdLine,
     _In_ int nShowCmd) {
     WNDCLASS window_class = {};
+
+    Win32ResizeDIBSection(&global_backbuffer, 1200, 720);
 
     window_class.style = CS_OWNDC | CS_HREDRAW | CS_VREDRAW;
     window_class.lpfnWndProc = Win32MainWindowCallback;
@@ -201,6 +193,10 @@ int CALLBACK WinMain(
             nullptr);
         if (window_handle) {
             MSG message;
+
+            int x_offset = 0;
+            int y_offset = 0;
+
             Running = true;
             while (Running) {
                 while (PeekMessage(&message, nullptr, 0, 0, PM_REMOVE)) {
@@ -210,6 +206,18 @@ int CALLBACK WinMain(
                     TranslateMessage(&message);
                     DispatchMessage(&message);
                 }
+
+                RenderWeirdGradient(global_backbuffer, x_offset, y_offset);
+
+                HDC device_context = GetDC(window_handle);
+                const win32_window_dimensions dimensions = get_window_dimensions(window_handle);
+                Win32DisplayBufferInWindow(device_context, dimensions.width, dimensions.height, global_backbuffer, 0, 0,
+                                           dimensions.width, dimensions.height);
+
+                ReleaseDC(window_handle, device_context);
+
+                ++x_offset;
+                y_offset += 2;
             }
         } else {
             // todo nice error handling
