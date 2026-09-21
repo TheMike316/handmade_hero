@@ -1,5 +1,7 @@
 #include <windows.h>
 #include <cstdint>
+#include <iostream>
+#include <xinput.h>
 
 // static is a horrible keyword in c/c++
 #define local_persist static
@@ -20,6 +22,42 @@ struct win32_window_dimensions {
     int height;
 };
 
+// NOTE(mike): manually loading xinput functions to handle potential version issues
+#define X_INPUT_GET_STATE(name) DWORD WINAPI name(DWORD dw_user_index, XINPUT_STATE *p_out_state)
+#define X_INPUT_SET_STATE(name) DWORD WINAPI name(DWORD dw_user_index, XINPUT_VIBRATION *p_vibration)
+
+//typedef DWORD WINAPI x_input_set_state(DWORD dw_user_index, XINPUT_VIBRATION *p_vibration);
+typedef X_INPUT_SET_STATE(x_input_set_state);
+
+//typedef DWORD WINAPI x_input_get_state(DWORD dw_user_index, XINPUT_STATE *p_out_state);
+typedef X_INPUT_GET_STATE(x_input_get_state);
+
+// NOTE(mike): we create stubs so that we don't crash if xinput is not supported
+X_INPUT_GET_STATE(XInputGetStateStub) {
+    return 0;
+}
+
+X_INPUT_SET_STATE(XInputSetStateStub) {
+    return 0;
+}
+
+global_variable x_input_set_state *XInputSetState_ = XInputSetStateStub;
+global_variable x_input_get_state *XInputGetState_ = XInputGetStateStub;
+// NOTE(mike): maybe getting too clever here
+#define XInputSetState XInputSetState_
+#define XInputGetState XInputGetState_
+
+internal void
+Win32LoadXInput(void) {
+    // NOTE(mike): we try to manually load the xinput functions we want to use
+    HMODULE xinput_lib = LoadLibrary("xinput1_3.dll");
+    if (xinput_lib) {
+        XInputGetState = (x_input_get_state *) GetProcAddress(xinput_lib, "XInputGetState");
+        XInputSetState = (x_input_set_state *) GetProcAddress(xinput_lib, "XInputSetState");
+    }
+}
+
+
 internal win32_window_dimensions
 get_window_dimensions(HWND window) {
     RECT client_rect;
@@ -38,13 +76,13 @@ global_variable win32_offscreen_buffer global_backbuffer;
 
 
 internal void
-RenderWeirdGradient(win32_offscreen_buffer buffer, int x_offset, int y_offset) {
+RenderWeirdGradient(const win32_offscreen_buffer *buffer, int x_offset, int y_offset) {
     // TODO decide whether to pass by ref or val
     // not sure about this fancy c++ stuff
-    uint8_t *row = (uint8_t *) buffer.memory;
-    for (int y = 0; y < buffer.height; ++y) {
+    uint8_t *row = (uint8_t *) buffer->memory;
+    for (int y = 0; y < buffer->height; ++y) {
         uint32_t *pixel = (uint32_t *) row;
-        for (int x = 0; x < buffer.width; ++x) {
+        for (int x = 0; x < buffer->width; ++x) {
             /*
              *                  0  1  2  3
              * Pixel in memory: 00 00 00 00
@@ -58,7 +96,7 @@ RenderWeirdGradient(win32_offscreen_buffer buffer, int x_offset, int y_offset) {
 
             *pixel++ = (green << 8) | blue;
         }
-        row += buffer.pitch;
+        row += buffer->pitch;
     }
 }
 
@@ -90,15 +128,16 @@ Win32ResizeDIBSection(win32_offscreen_buffer *buffer, int width, int height) {
 }
 
 internal void
-Win32DisplayBufferInWindow(HDC device_context, int window_width, int window_height, win32_offscreen_buffer buffer,
+Win32DisplayBufferInWindow(const win32_offscreen_buffer *buffer, HDC device_context, int window_width,
+                           int window_height,
                            int x, int y, int width, int height) {
     // TODO aspect ratio correction
     StretchDIBits(
         device_context,
         0, 0, window_width, window_height,
-        0, 0, buffer.width, buffer.height,
-        buffer.memory,
-        &buffer.info,
+        0, 0, buffer->width, buffer->height,
+        buffer->memory,
+        &(buffer->info),
         DIB_RGB_COLORS,
         SRCCOPY
     );
@@ -117,6 +156,52 @@ Win32MainWindowCallback(
             OutputDebugString("WM_SIZE\n");
         }
         break;
+        case WM_SYSKEYDOWN:
+        case WM_SYSKEYUP:
+        case WM_KEYDOWN:
+        case WM_KEYUP: {
+            uint32_t vk_code = LOWORD(wParam);
+            // VK codes are keys that don't have a direct ansi mapping
+            // otherwise they map to the capitalized letter, for example 'W'
+            // if (vk_code == 'W')
+            //    printf("big W\n");
+
+            // lParam at bit 30 tells us whether the key WAS down previously
+            bool was_down = (lParam & (1 << 30)) != 0;
+            // lParam at bit 31 tells us whether the key IS down currently
+            bool is_down = (lParam & (1 << 31)) != 0;
+            // lParam does contain key repeats, so holding a key down would simultaneously send is_down and was_down
+            if (is_down == was_down) {
+                break;
+            }
+
+            if (vk_code == 'W') {
+                OutputDebugString("W");
+            } else if (vk_code == 'S') {
+                OutputDebugString("S");
+            } else if (vk_code == 'A') {
+                OutputDebugString("A");
+            } else if (vk_code == 'D') {
+                OutputDebugString("D");
+            } else if (vk_code == 'Q') {
+                OutputDebugString("Q");
+            } else if (vk_code == 'E') {
+                OutputDebugString("E");
+            } else if (vk_code == VK_UP) {
+                OutputDebugString("UP");
+            } else if (vk_code == VK_DOWN) {
+                OutputDebugString("DOWN");
+            } else if (vk_code == VK_LEFT) {
+                OutputDebugString("LEFT");
+            } else if (vk_code == VK_RIGHT) {
+                OutputDebugString("RIGHT");
+            } else if (vk_code == VK_ESCAPE) {
+                OutputDebugString("ESC");
+            } else if (vk_code == VK_SPACE) {
+                OutputDebugString("SPACE");
+            }
+        }
+        break;
         case WM_PAINT: {
             RECT client_rect;
             GetClientRect(window, &client_rect);
@@ -130,7 +215,8 @@ Win32MainWindowCallback(
                 width = paint.rcPaint.right - paint.rcPaint.left;
                 height = paint.rcPaint.bottom - paint.rcPaint.top;
                 const win32_window_dimensions dimensions = get_window_dimensions(window);
-                Win32DisplayBufferInWindow(device_context, dimensions.width, dimensions.height, global_backbuffer, x, y,
+                Win32DisplayBufferInWindow(&global_backbuffer, device_context, dimensions.width, dimensions.height, x,
+                                           y,
                                            width, height);
             } else {
                 // TODO errohandling
@@ -168,6 +254,8 @@ WinMain(
     _In_opt_ HINSTANCE hPrevInstance,
     _In_ LPSTR lpCmdLine,
     _In_ int nShowCmd) {
+    Win32LoadXInput();
+
     WNDCLASS window_class = {};
 
     Win32ResizeDIBSection(&global_backbuffer, 1200, 720);
@@ -207,17 +295,58 @@ WinMain(
                     DispatchMessage(&message);
                 }
 
-                RenderWeirdGradient(global_backbuffer, x_offset, y_offset);
+                // handling inputs
+                // TODO(mike): poll more frequently
+                DWORD dwResult;
+                for (DWORD controller_idx = 0; controller_idx < XUSER_MAX_COUNT; ++controller_idx) {
+                    XINPUT_STATE controller_state;
+                    dwResult = XInputGetState(controller_idx, &controller_state);
+                    if (dwResult == ERROR_SUCCESS) {
+                        // controller is connected
+                        // TODO(mike): see if dwPacketNumber increases too frequently
+                        XINPUT_GAMEPAD *pad = &controller_state.Gamepad;
+                        bool pad_d_up = pad->wButtons & XINPUT_GAMEPAD_DPAD_UP;
+                        bool pad_d_down = pad->wButtons & XINPUT_GAMEPAD_DPAD_DOWN;
+                        bool pad_d_left = pad->wButtons & XINPUT_GAMEPAD_DPAD_LEFT;
+                        bool pad_d_right = pad->wButtons & XINPUT_GAMEPAD_DPAD_RIGHT;
+                        bool pad_start = pad->wButtons & XINPUT_GAMEPAD_START;
+                        bool pad_back = pad->wButtons & XINPUT_GAMEPAD_BACK;
+                        bool pad_left_shoulder = pad->wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER;
+                        bool pad_right_shoulder = pad->wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER;
+                        bool pad_a = pad->wButtons & XINPUT_GAMEPAD_A;
+                        bool pad_b = pad->wButtons & XINPUT_GAMEPAD_B;
+                        bool pad_x = pad->wButtons & XINPUT_GAMEPAD_X;
+                        bool pad_y = pad->wButtons & XINPUT_GAMEPAD_Y;
+
+                        int16_t stick_x = controller_state.Gamepad.sThumbLX;
+                        int16_t stick_y = controller_state.Gamepad.sThumbLY;
+
+                        if (pad_a) {
+                            y_offset += 2;
+                        }
+                    } else {
+                        // controller is not connected
+                    }
+                }
+
+                // test rumble; left for reference
+                // XINPUT_VIBRATION vib;
+                // vib.wLeftMotorSpeed = 60000;
+                // vib.wRightMotorSpeed = 60000;
+                // XInputSetState(0, &vib);
+
+                RenderWeirdGradient(&global_backbuffer, x_offset, y_offset);
 
                 HDC device_context = GetDC(window_handle);
                 const win32_window_dimensions dimensions = get_window_dimensions(window_handle);
-                Win32DisplayBufferInWindow(device_context, dimensions.width, dimensions.height, global_backbuffer, 0, 0,
+                Win32DisplayBufferInWindow(&global_backbuffer, device_context, dimensions.width, dimensions.height, 0,
+                                           0,
                                            dimensions.width, dimensions.height);
 
                 ReleaseDC(window_handle, device_context);
 
                 ++x_offset;
-                y_offset += 2;
+                // y_offset += 2; testing controller input
             }
         } else {
             // todo nice error handling
