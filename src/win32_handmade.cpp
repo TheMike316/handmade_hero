@@ -8,6 +8,9 @@
 #define global_variable static
 #define internal static
 
+// in c++ bool needs to be either 0 or 1, so the compiler creates implicit "conversion" from any int > 0 to 1, which is unnecessary
+typedef int32_t bool32;
+
 struct win32_offscreen_buffer {
     BITMAPINFO info;
     void *memory;
@@ -22,7 +25,7 @@ struct win32_window_dimensions {
     int height;
 };
 
-// NOTE(mike): manually loading xinput functions to handle potential version issues
+// NOTE(mike): manually loading xinput functions to deal with potentially missing/incorrect library
 #define X_INPUT_GET_STATE(name) DWORD WINAPI name(DWORD dw_user_index, XINPUT_STATE *p_out_state)
 #define X_INPUT_SET_STATE(name) DWORD WINAPI name(DWORD dw_user_index, XINPUT_VIBRATION *p_vibration)
 
@@ -34,11 +37,12 @@ typedef X_INPUT_GET_STATE(x_input_get_state);
 
 // NOTE(mike): we create stubs so that we don't crash if xinput is not supported
 X_INPUT_GET_STATE(XInputGetStateStub) {
-    return 0;
+    // if we can't load xinput, we return DEVICE_NOT_CONNECTED as an error code because if no lib the pad is essentially not connected
+    return ERROR_DEVICE_NOT_CONNECTED;
 }
 
 X_INPUT_SET_STATE(XInputSetStateStub) {
-    return 0;
+    return ERROR_DEVICE_NOT_CONNECTED;
 }
 
 global_variable x_input_set_state *XInputSetState_ = XInputSetStateStub;
@@ -71,7 +75,7 @@ get_window_dimensions(HWND window) {
 }
 
 // TODO these are global for now
-global_variable bool Running;
+global_variable bool32 Running;
 global_variable win32_offscreen_buffer global_backbuffer;
 
 
@@ -167,38 +171,42 @@ Win32MainWindowCallback(
             //    printf("big W\n");
 
             // lParam at bit 30 tells us whether the key WAS down previously
-            bool was_down = (lParam & (1 << 30)) != 0;
+            bool32 was_down = (lParam & (1 << 30)) != 0;
             // lParam at bit 31 tells us whether the key IS down currently
-            bool is_down = (lParam & (1 << 31)) != 0;
+            bool32 is_down = (lParam & (1 << 31)) != 0;
             // lParam does contain key repeats, so holding a key down would simultaneously send is_down and was_down
-            if (is_down == was_down) {
-                break;
+            if (is_down != was_down) {
+                if (vk_code == 'W') {
+                    OutputDebugString("W");
+                } else if (vk_code == 'S') {
+                    OutputDebugString("S");
+                } else if (vk_code == 'A') {
+                    OutputDebugString("A");
+                } else if (vk_code == 'D') {
+                    OutputDebugString("D");
+                } else if (vk_code == 'Q') {
+                    OutputDebugString("Q");
+                } else if (vk_code == 'E') {
+                    OutputDebugString("E");
+                } else if (vk_code == VK_UP) {
+                    OutputDebugString("UP");
+                } else if (vk_code == VK_DOWN) {
+                    OutputDebugString("DOWN");
+                } else if (vk_code == VK_LEFT) {
+                    OutputDebugString("LEFT");
+                } else if (vk_code == VK_RIGHT) {
+                    OutputDebugString("RIGHT");
+                } else if (vk_code == VK_ESCAPE) {
+                    OutputDebugString("ESC");
+                } else if (vk_code == VK_SPACE) {
+                    OutputDebugString("SPACE");
+                }
             }
 
-            if (vk_code == 'W') {
-                OutputDebugString("W");
-            } else if (vk_code == 'S') {
-                OutputDebugString("S");
-            } else if (vk_code == 'A') {
-                OutputDebugString("A");
-            } else if (vk_code == 'D') {
-                OutputDebugString("D");
-            } else if (vk_code == 'Q') {
-                OutputDebugString("Q");
-            } else if (vk_code == 'E') {
-                OutputDebugString("E");
-            } else if (vk_code == VK_UP) {
-                OutputDebugString("UP");
-            } else if (vk_code == VK_DOWN) {
-                OutputDebugString("DOWN");
-            } else if (vk_code == VK_LEFT) {
-                OutputDebugString("LEFT");
-            } else if (vk_code == VK_RIGHT) {
-                OutputDebugString("RIGHT");
-            } else if (vk_code == VK_ESCAPE) {
-                OutputDebugString("ESC");
-            } else if (vk_code == VK_SPACE) {
-                OutputDebugString("SPACE");
+            // implementing ALT + F4
+            bool32 alt_key_down = (bool32) lParam & (1 << 29);
+            if (vk_code == VK_F4 && alt_key_down) {
+                Running = false;
             }
         }
         break;
@@ -305,18 +313,18 @@ WinMain(
                         // controller is connected
                         // TODO(mike): see if dwPacketNumber increases too frequently
                         XINPUT_GAMEPAD *pad = &controller_state.Gamepad;
-                        bool pad_d_up = pad->wButtons & XINPUT_GAMEPAD_DPAD_UP;
-                        bool pad_d_down = pad->wButtons & XINPUT_GAMEPAD_DPAD_DOWN;
-                        bool pad_d_left = pad->wButtons & XINPUT_GAMEPAD_DPAD_LEFT;
-                        bool pad_d_right = pad->wButtons & XINPUT_GAMEPAD_DPAD_RIGHT;
-                        bool pad_start = pad->wButtons & XINPUT_GAMEPAD_START;
-                        bool pad_back = pad->wButtons & XINPUT_GAMEPAD_BACK;
-                        bool pad_left_shoulder = pad->wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER;
-                        bool pad_right_shoulder = pad->wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER;
-                        bool pad_a = pad->wButtons & XINPUT_GAMEPAD_A;
-                        bool pad_b = pad->wButtons & XINPUT_GAMEPAD_B;
-                        bool pad_x = pad->wButtons & XINPUT_GAMEPAD_X;
-                        bool pad_y = pad->wButtons & XINPUT_GAMEPAD_Y;
+                        bool32 pad_d_up = pad->wButtons & XINPUT_GAMEPAD_DPAD_UP;
+                        bool32 pad_d_down = pad->wButtons & XINPUT_GAMEPAD_DPAD_DOWN;
+                        bool32 pad_d_left = pad->wButtons & XINPUT_GAMEPAD_DPAD_LEFT;
+                        bool32 pad_d_right = pad->wButtons & XINPUT_GAMEPAD_DPAD_RIGHT;
+                        bool32 pad_start = pad->wButtons & XINPUT_GAMEPAD_START;
+                        bool32 pad_back = pad->wButtons & XINPUT_GAMEPAD_BACK;
+                        bool32 pad_left_shoulder = pad->wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER;
+                        bool32 pad_right_shoulder = pad->wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER;
+                        bool32 pad_a = pad->wButtons & XINPUT_GAMEPAD_A;
+                        bool32 pad_b = pad->wButtons & XINPUT_GAMEPAD_B;
+                        bool32 pad_x = pad->wButtons & XINPUT_GAMEPAD_X;
+                        bool32 pad_y = pad->wButtons & XINPUT_GAMEPAD_Y;
 
                         int16_t stick_x = controller_state.Gamepad.sThumbLX;
                         int16_t stick_y = controller_state.Gamepad.sThumbLY;
